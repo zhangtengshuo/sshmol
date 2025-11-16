@@ -166,6 +166,14 @@ def clamp_zoom(value):
     return max(MIN_ZOOM, min(MAX_ZOOM, value))
 
 
+def compute_base_scale(max_radius, img_w, img_h, theme):
+    """Compute how much to scale projected coordinates to fit the canvas."""
+    fill_ratio = float(theme.get("fill_ratio", 0.8)) if theme else 0.8
+    fill_ratio = max(0.1, min(fill_ratio, 0.98))
+    safe_radius = max(float(max_radius), 1e-3)
+    return (min(img_w, img_h) * fill_ratio) / (2.0 * safe_radius)
+
+
 # -------------------- 分子数据处理 --------------------
 
 def parse_xyz(path):
@@ -306,11 +314,23 @@ def draw_molecule(
     zoom,
     img_w,
     img_h,
-    base_scale,
-    theme,
+    base_scale=None,
+    theme=None,
     quality="fast",
 ):
     """生成一张 PNG 图像（PIL Image），简单球棒模型."""
+    if theme is None and isinstance(base_scale, dict):  # 兼容旧版调用顺序
+        theme = base_scale
+        base_scale = None
+
+    if theme is None:
+        theme = DEFAULT_CONFIG["themes"]["light"]
+
+    if base_scale is None:
+        radii = np.linalg.norm(coords, axis=1) if len(coords) else np.array([1e-3])
+        max_r = float(radii.max()) if radii.size else 1e-3
+        base_scale = compute_base_scale(max_r, img_w, img_h, theme)
+
     bg = tuple(theme["background"])
     bond_color = tuple(theme["bond_color"])
     bond_width = int(theme.get("bond_width", 2))
@@ -401,18 +421,13 @@ def viewer(stdscr, xyz_path, theme):
 
     # 用 coords 的范数最大值作为分子“半径”
     radii = np.linalg.norm(coords, axis=1)
-    max_r = max(radii.max(), 1e-3)
+    max_r = float(radii.max()) if radii.size else 1e-3
 
     # 根据终端尺寸估一个图片大小（尽量撑满，最后一行留给提示）
     img_w = MAX_IMG_W
     img_h = MAX_IMG_H
 
-    fill_ratio = float(theme.get("fill_ratio", 0.8))
-    fill_ratio = max(0.1, min(fill_ratio, 0.98))
-
-    # 目标：分子的投影半径约等于 target_radius
-    target_radius = (min(img_w, img_h) * fill_ratio) / 2.0
-    min_proj_radius = max(max_r * 0.2, 1e-3)
+    base_scale = compute_base_scale(max_r, img_w, img_h, theme)
 
     dirty = True        # 是否需要重绘
     quality_mode = "fast"
