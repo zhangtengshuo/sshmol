@@ -89,7 +89,7 @@ HIGH_MODE_COLORS = 256
 HIGH_QUALITY_IDLE_SECONDS = 1.0
 MIN_ZOOM = 0.1
 MAX_ZOOM = 10.0
-FRAME_SKIP_RENDER_THRESHOLD = 0.12
+SLOW_RENDER_THRESHOLD = 0.12
 
 # 简单的共价半径（Å），只为判断是否画键
 COVALENT_RADII = {
@@ -164,6 +164,14 @@ def get_theme(config, theme_name=None):
 
 def clamp_zoom(value):
     return max(MIN_ZOOM, min(MAX_ZOOM, value))
+
+
+def compute_base_scale(max_radius, img_w, img_h, theme):
+    """Compute how much to scale projected coordinates to fit the canvas."""
+    fill_ratio = float(theme.get("fill_ratio", 0.8)) if theme else 0.8
+    fill_ratio = max(0.1, min(fill_ratio, 0.98))
+    safe_radius = max(float(max_radius), 1e-3)
+    return (min(img_w, img_h) * fill_ratio) / (2.0 * safe_radius)
 
 
 # -------------------- 分子数据处理 --------------------
@@ -300,9 +308,30 @@ def _draw_high_quality_sphere(canvas, color, r, center):
 
 
 def draw_molecule(
-    symbols, coords, bonds, R, zoom, img_w, img_h, base_scale, theme, quality="fast"
+    symbols,
+    coords,
+    bonds,
+    R,
+    zoom,
+    img_w,
+    img_h,
+    base_scale=None,
+    theme=None,
+    quality="fast",
 ):
     """生成一张 PNG 图像（PIL Image），简单球棒模型."""
+    if theme is None and isinstance(base_scale, dict):  # 兼容旧版调用顺序
+        theme = base_scale
+        base_scale = None
+
+    if theme is None:
+        theme = DEFAULT_CONFIG["themes"]["light"]
+
+    if base_scale is None:
+        radii = np.linalg.norm(coords, axis=1) if len(coords) else np.array([1e-3])
+        max_r = float(radii.max()) if radii.size else 1e-3
+        base_scale = compute_base_scale(max_r, img_w, img_h, theme)
+
     bg = tuple(theme["background"])
     bond_color = tuple(theme["bond_color"])
     bond_width = int(theme.get("bond_width", 2))
@@ -391,26 +420,20 @@ def viewer(stdscr, xyz_path, theme):
     R = rot_y(0.8) @ rot_x(0.5)
     zoom = 1.0
 
-    # 用分子整体半径决定 base_scale（固定），只在窗口大小或配置变化时重算
-    # 这里用 coords 的范数最大值作为分子“半径”
+    # 用 coords 的范数最大值作为分子“半径”
     radii = np.linalg.norm(coords, axis=1)
-    max_r = max(radii.max(), 1e-3)
+    max_r = float(radii.max()) if radii.size else 1e-3
 
     # 根据终端尺寸估一个图片大小（尽量撑满，最后一行留给提示）
     img_w = MAX_IMG_W
     img_h = MAX_IMG_H
 
-    fill_ratio = float(theme.get("fill_ratio", 0.8))
-    fill_ratio = max(0.1, min(fill_ratio, 0.98))
-
-    # 让分子半径在画布中占据 fill_ratio * min(img_w, img_h)/2
-    base_scale = (min(img_w, img_h) * fill_ratio) / (2.0 * max_r)
+    base_scale = compute_base_scale(max_r, img_w, img_h, theme)
 
     dirty = True        # 是否需要重绘
     quality_mode = "fast"
     last_render_quality = None
     last_input_time = time.monotonic()
-    skip_frame_budget = 0
 
     # 临时目录保存 PNG
     tmpdir = tempfile.mkdtemp(prefix="mol_sixel_viewer_")
@@ -479,11 +502,6 @@ def viewer(stdscr, xyz_path, theme):
 
             now = time.monotonic()
 
-            if skip_frame_budget > 0 and dirty:
-                skip_frame_budget -= 1
-                curses.napms(5)
-                continue
-
             if events_processed == 0 and not dirty:
                 if (
                     last_render_quality != "high"
@@ -536,11 +554,9 @@ def viewer(stdscr, xyz_path, theme):
                     pass
 
                 render_duration = time.monotonic() - render_start
-                if (
-                    events_processed > 0
-                    and render_duration > FRAME_SKIP_RENDER_THRESHOLD
-                ):
-                    skip_frame_budget = max(skip_frame_budget, 1)
+                # 渲染太慢时就保持快速模式，而不是跳帧避免闪烁
+                if events_processed > 0 and render_duration > SLOW_RENDER_THRESHOLD:
+                    quality_mode = "fast"
 
     finally:
         # 清理临时文件
