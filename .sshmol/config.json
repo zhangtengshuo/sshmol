@@ -1,0 +1,33 @@
+{
+  "default_theme": "light",
+  "themes": {
+    "light": {
+      "background": [255, 255, 255],
+      "bond_color": [150, 150, 150],
+      "bond_width": 2,
+      "fill_ratio": 0.7,
+      "pixel_per_char": [8, 16],
+      "element_style": {
+        "H": { "color": [240, 240, 240], "radius": 1 },
+        "C": { "color": [50, 50, 50], "radius": 3 },
+        "N": { "color": [50, 50, 200], "radius": 3 },
+        "O": { "color": [200, 30, 30], "radius": 3 },
+        "S": { "color": [255, 215, 0], "radius": 4 }
+      }
+    },
+    "dark": {
+      "background": [20, 20, 20],
+      "bond_color": [200, 200, 200],
+      "bond_width": 2,
+      "fill_ratio": 0.7,
+      "pixel_per_char": [8, 16],
+      "element_style": {
+        "H": { "color": [200, 200, 200], "radius": 6 },
+        "C": { "color": [220, 220, 220], "radius": 10 },
+        "N": { "color": [100, 150, 255], "radius": 10 },
+        "O": { "color": [255, 120, 120], "radius": 10 },
+        "S": { "color": [255, 230, 120], "radius": 12 }
+      }
+    }
+  }
+}
