@@ -89,7 +89,7 @@ HIGH_MODE_COLORS = 256
 HIGH_QUALITY_IDLE_SECONDS = 1.0
 MIN_ZOOM = 0.1
 MAX_ZOOM = 10.0
-FRAME_SKIP_RENDER_THRESHOLD = 0.12
+SLOW_RENDER_THRESHOLD = 0.12
 
 # 简单的共价半径（Å），只为判断是否画键
 COVALENT_RADII = {
@@ -300,8 +300,9 @@ def _draw_high_quality_sphere(canvas, color, r, center):
 
 def draw_molecule(
     symbols,
-    rotated_coords,
+    coords,
     bonds,
+    R,
     zoom,
     img_w,
     img_h,
@@ -398,7 +399,7 @@ def viewer(stdscr, xyz_path, theme):
     R = rot_y(0.8) @ rot_x(0.5)
     zoom = 1.0
 
-    # 用 coords 的范数最大值作为分子“半径”，给后续自适应缩放一个参考
+    # 用 coords 的范数最大值作为分子“半径”
     radii = np.linalg.norm(coords, axis=1)
     max_r = max(radii.max(), 1e-3)
 
@@ -417,7 +418,6 @@ def viewer(stdscr, xyz_path, theme):
     quality_mode = "fast"
     last_render_quality = None
     last_input_time = time.monotonic()
-    skip_frame_budget = 0
 
     # 临时目录保存 PNG
     tmpdir = tempfile.mkdtemp(prefix="mol_sixel_viewer_")
@@ -486,11 +486,6 @@ def viewer(stdscr, xyz_path, theme):
 
             now = time.monotonic()
 
-            if skip_frame_budget > 0 and dirty:
-                skip_frame_budget -= 1
-                curses.napms(5)
-                continue
-
             if events_processed == 0 and not dirty:
                 if (
                     last_render_quality != "high"
@@ -547,11 +542,9 @@ def viewer(stdscr, xyz_path, theme):
                     pass
 
                 render_duration = time.monotonic() - render_start
-                if (
-                    events_processed > 0
-                    and render_duration > FRAME_SKIP_RENDER_THRESHOLD
-                ):
-                    skip_frame_budget = max(skip_frame_budget, 1)
+                # 渲染太慢时就保持快速模式，而不是跳帧避免闪烁
+                if events_processed > 0 and render_duration > SLOW_RENDER_THRESHOLD:
+                    quality_mode = "fast"
 
     finally:
         # 清理临时文件
