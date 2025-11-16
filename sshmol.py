@@ -239,15 +239,14 @@ def rot_y(angle):
     return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=float)
 
 
-def project_atoms(coords, R, zoom, img_w, img_h, base_scale):
+def project_atoms(rotated_coords, zoom, img_w, img_h, base_scale):
     """
-    把 3D 坐标用当前旋转矩阵 R 投影到 2D 像素坐标.
-    base_scale: 已经根据分子整体 + 画布尺寸算好的固定缩放因子
+    把已经旋转好的 3D 坐标投影到 2D 像素坐标.
+    base_scale: 根据分子投影尺寸和画布尺寸计算出的缩放因子
     """
-    rotated = coords @ R.T  # (N,3)
-    xs = rotated[:, 0] * (base_scale * zoom) + img_w / 2.0
-    ys = -rotated[:, 1] * (base_scale * zoom) + img_h / 2.0
-    zs = rotated[:, 2]
+    xs = rotated_coords[:, 0] * (base_scale * zoom) + img_w / 2.0
+    ys = -rotated_coords[:, 1] * (base_scale * zoom) + img_h / 2.0
+    zs = rotated_coords[:, 2]
     return xs, ys, zs
 
 
@@ -338,7 +337,7 @@ def draw_molecule(
 
     element_style = theme.get("element_style", {})
 
-    xs, ys, zs = project_atoms(coords, R, zoom, img_w, img_h, base_scale)
+    xs, ys, zs = project_atoms(rotated_coords, zoom, img_w, img_h, base_scale)
 
     aa_scale = 2 if quality == "high" else 1
     canvas_size = (img_w * aa_scale, img_h * aa_scale)
@@ -516,11 +515,15 @@ def viewer(stdscr, xyz_path, theme):
             if dirty:
                 dirty = False
                 render_start = time.monotonic()
+                rotated_coords = coords @ R.T
+                proj_radius = np.linalg.norm(rotated_coords[:, :2], axis=1).max()
+                proj_radius = max(proj_radius, min_proj_radius)
+                base_scale = target_radius / proj_radius
+
                 img = draw_molecule(
                     symbols,
-                    coords,
+                    rotated_coords,
                     bonds,
-                    R,
                     zoom,
                     img_w,
                     img_h,
