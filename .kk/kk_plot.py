@@ -5,7 +5,12 @@
 from typing import List, Dict, Any
 
 
-def make_plot(steps: List[Dict[str, Any]], step_idx: int, png_path: str):
+def make_plot(
+    steps: List[Dict[str, Any]],
+    step_idx: int,
+    png_path: str,
+    energy_tracks: List[Dict[str, Any]],
+):
     """
     单张图：
       - 左轴：Energy (kcal/mol)，线性坐标，黑线，零点为所有几何步中最低能量
@@ -42,13 +47,31 @@ def make_plot(steps: List[Dict[str, Any]], step_idx: int, png_path: str):
     # 全部步的横坐标
     x_all = list(range(1, n + 1))
 
-    # ----- 能量：kcal/mol，相对所有几何步中最低能量 -----
+    # ----- 能量：kcal/mol，相对所有轨道最低能量 -----
     H2KCAL = 627.509474
-    energies_au_all = [s["energy"] for s in steps]
-    e_min = min(energies_au_all)
+    if not energy_tracks:
+        energy_tracks = [dict(name="Energy", values=[s["energy"] for s in steps])]
 
-    energies_kcal_all = [(e - e_min) * H2KCAL for e in energies_au_all]
-    max_e_rel = max(energies_kcal_all) if energies_kcal_all else 0.0
+    all_vals = [v for track in energy_tracks for v in track["values"] if v is not None]
+    if all_vals:
+        e_min = min(all_vals)
+    else:
+        e_min = min(s["energy"] for s in steps)
+
+    track_curves = []
+    max_e_rel = 0.0
+    for track in energy_tracks:
+        rel_vals = []
+        for v in track["values"]:
+            if v is None:
+                rel_vals.append(float("nan"))
+            else:
+                rel = (v - e_min) * H2KCAL
+                rel_vals.append(rel)
+                if rel > max_e_rel:
+                    max_e_rel = rel
+        track_curves.append(dict(name=track.get("name", "Energy"), values=rel_vals))
+
     if max_e_rel <= 0.0:
         max_e_rel = 1.0
     # 稍微留一点上边距
@@ -118,14 +141,23 @@ def make_plot(steps: List[Dict[str, Any]], step_idx: int, png_path: str):
     )
 
     # ===== 左轴：能量（kcal/mol），完整曲线，黑线 + 菱形点 =====
-    ax_en.plot(
-        x_all,
-        energies_kcal_all,
-        color="black",
-        marker="D",          # 菱形
-        markersize=8,
-        linewidth=2.0
-    )
+    energy_colors = ["black", "#9467bd", "#2ca02c", "#ff7f0e", "#8c564b"]
+    energy_markers = ["D", "o", "s", "^", "v"]
+    energy_handles = []
+    for idx_track, track in enumerate(track_curves):
+        color = energy_colors[idx_track % len(energy_colors)]
+        marker = energy_markers[idx_track % len(energy_markers)]
+        handle, = ax_en.plot(
+            x_all,
+            track["values"],
+            color=color,
+            marker=marker,
+            markersize=6,
+            linewidth=2.0,
+            label=track["name"],
+        )
+        energy_handles.append(handle)
+
     ax_en.set_ylabel("Energy (kcal/mol)")
     ax_en.grid(True, linestyle=":")
     # x 轴左右留一点余量
@@ -214,6 +246,9 @@ def make_plot(steps: List[Dict[str, Any]], step_idx: int, png_path: str):
 
     # 图例只含 4 条主线，放右上
     ax_conv.legend(fontsize=7, loc="upper right")
+
+    if len(energy_handles) > 1:
+        ax_en.legend(handles=energy_handles, loc="upper left", fontsize=7)
 
     fig.tight_layout()
     fig.savefig(

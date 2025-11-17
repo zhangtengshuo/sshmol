@@ -1,10 +1,11 @@
 # kk_parse.py
 # 负责解析 OpenMolcas .out：几何优化步 + CI 信息
 
+import bisect
 import glob
 import os
 import re
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 
 
 def find_openmolcas_out() -> str:
@@ -112,6 +113,55 @@ def parse_geom_stats(text: str) -> List[Dict[str, Any]]:
     return steps
 
 
+def _build_subproject_markers(text: str) -> Tuple[List[int], List[str]]:
+    markers_pos: List[int] = []
+    markers_val: List[str] = []
+    pattern = re.compile(r">>>\s+EXPORT\s+SubProject[ \t]*=[ \t]*([^\r\n]*)")
+    for m in pattern.finditer(text):
+        name = m.group(1).strip()
+        if not name:
+            name = None
+        markers_pos.append(m.start())
+        markers_val.append(name)
+    return markers_pos, markers_val
+
+
+def list_subprojects(text: str) -> List[str]:
+    """Ordered unique SubProject names (non-empty)."""
+    seen = set()
+    ordered: List[str] = []
+    pattern = re.compile(r">>>\s+EXPORT\s+SubProject[ \t]*=[ \t]*([^\r\n]*)")
+    for m in pattern.finditer(text):
+        name = m.group(1).strip()
+        if not name:
+            continue
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def _subproject_for_pos(pos: int, markers_pos: List[int], markers_val: List[str]) -> str:
+    if not markers_pos:
+        return ""
+    idx = bisect.bisect_right(markers_pos, pos) - 1
+    if idx < 0:
+        return ""
+    name = markers_val[idx]
+    return name or ""
+
+
+def _step_index_from_pos(pos: int, geom_positions: List[int]) -> int:
+    if not geom_positions:
+        return 1
+    idx = bisect.bisect_right(geom_positions, pos)
+    if idx <= 0:
+        return 1
+    if idx > len(geom_positions):
+        return len(geom_positions)
+    return idx
+
+
 def parse_ci_block(text: str, start_pos: int) -> Dict[str, Any]:
     """解析一个 CI block"""
     segment = text[start_pos : start_pos + 1200]
@@ -160,36 +210,102 @@ def parse_ci_block(text: str, start_pos: int) -> Dict[str, Any]:
     return dict(energy=energy, configs=configs)
 
 
-def build_ci_by_step(text: str, steps: List[Dict[str, Any]]) -> Dict[int, Dict[int, Dict[str, Any]]]:
+def _parse_mixed_ci_block(text: str, start_pos: int) -> Dict[int, Dict[str, Any]]:
+    segment = text[start_pos : start_pos + 4000]
+    lines = segment.splitlines()
+    idx = 0
+    results: Dict[int, Dict[str, Any]] = {}
+
+    while idx < len(lines):
+        line = lines[idx]
+        m = re.search(r"MIXED state nr\.\s+(\d+)", line)
+        if not m:
+            idx += 1
+            continue
+        root = int(m.group(1))
+        idx += 1
+        # Skip headers until the "Conf" line
+        while idx < len(lines) and "Conf" not in lines[idx]:
+            idx += 1
+        if idx >= len(lines):
+            break
+        idx += 1
+        configs = []
+        while idx < len(lines):
+            line = lines[idx]
+            if not line.strip():
+                break
+            parts = line.split()
+            if len(parts) < 5:
+                break
+            try:
+                conf_idx = int(parts[0])
+            except ValueError:
+                break
+
+            # Occupation string 紧跟在括号描述之后
+            occ_pos = None
+            for j in range(1, len(parts)):
+                if parts[j].endswith(")"):
+                    occ_pos = j + 1
+                    break
+            if occ_pos is None or occ_pos + 2 >= len(parts):
+                break
+
+            occupation = parts[occ_pos]
+
+            try:
+                coeff = float(parts[occ_pos + 1])
+                weight = float(parts[occ_pos + 2])
+            except ValueError:
+                break
+
+            configs.append(
+                dict(idx=conf_idx, conf=occupation, coeff=coeff, weight=weight)
+            )
+            idx += 1
+        results[root] = dict(configs=configs)
+        idx += 1
+    return results
+
+
+def build_ci_by_step(text: str, steps: List[Dict[str, Any]]) -> Dict[int, Dict[str, Dict[int, Dict[str, Any]]]]:
     """
-    把 CI block 按几何步分组：
-      ci_by_step[step_index][root] = {energy, configs}
+    把 CI block 按几何步 + SubProject 分组：
+      ci_by_step[step_index][subproject_key][root] = {configs, source}
+    优先使用 CASPT2 (MIXED) 的组态信息，没有则回退到 CASSCF。
     """
     geom_positions = [s["pos"] for s in steps]
-    ci_by_step: Dict[int, Dict[int, Dict[str, Any]]] = {}
+    markers_pos, markers_val = _build_subproject_markers(text)
+    ci_by_step: Dict[int, Dict[str, Dict[int, Dict[str, Any]]]] = {}
+    SOURCE_PRIORITY = {"CASSCF": 0, "CASPT2": 1}
 
-    ci_matches = list(
-        re.finditer(
-            r"printout of CI-coefficients larger than  0.05 for root\s+(\d+)",
-            text,
-        )
-    )
+    def store(step_idx: int, subproject_key: str, root: int, info: Dict[str, Any], source: str):
+        bucket = ci_by_step.setdefault(step_idx, {}).setdefault(subproject_key, {})
+        prev = bucket.get(root)
+        if prev and SOURCE_PRIORITY.get(prev.get("source", "CASSCF"), 0) > SOURCE_PRIORITY.get(source, 0):
+            return
+        new_info = dict(info)
+        new_info["source"] = source
+        bucket[root] = new_info
 
-    for m in ci_matches:
+    for m in re.finditer(
+        r"printout of CI-coefficients larger than  0.05 for root\s+(\d+)", text
+    ):
         pos = m.start()
         root = int(m.group(1))
-
-        step_idx = None
-        for i, gpos in enumerate(geom_positions, start=1):
-            if pos < gpos:
-                step_idx = i
-                break
-        if step_idx is None:
-            step_idx = len(geom_positions)
-
+        step_idx = _step_index_from_pos(pos, geom_positions)
+        subproject_key = _subproject_for_pos(pos, markers_pos, markers_val)
         info = parse_ci_block(text, pos)
-        ci_by_step.setdefault(step_idx, {})
-        ci_by_step[step_idx][root] = info
+        store(step_idx, subproject_key, root, info, "CASSCF")
+
+    for m in re.finditer(r"\+\+ Mixed CI coefficients:", text):
+        pos = m.start()
+        step_idx = _step_index_from_pos(pos, geom_positions)
+        subproject_key = _subproject_for_pos(pos, markers_pos, markers_val)
+        block = _parse_mixed_ci_block(text, pos)
+        for root, info in block.items():
+            store(step_idx, subproject_key, root, info, "CASPT2")
 
     return ci_by_step
 
@@ -206,4 +322,78 @@ def find_optimized_root(text: str) -> int:
         if nums:
             return int(nums[0])
     return 1
+
+
+def parse_ediff_targets(text: str) -> List[int]:
+    """解析 Constraints 中 Ediff 后面的态编号"""
+    m = re.search(
+        r"Constraints([\s\S]{0,500}?)End of constraints",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return []
+    block = m.group(1)
+    ediff = re.search(r"Ediff\s+([0-9\s]+)", block, flags=re.IGNORECASE)
+    if not ediff:
+        return []
+    nums = re.findall(r"\d+", ediff.group(1))
+    return [int(x) for x in nums]
+
+
+def collect_state_energies(
+    text: str, steps: List[Dict[str, Any]]
+) -> Dict[int, Dict[str, Dict[int, Dict[str, Any]]]]:
+    """
+    收集每一步、每个 SubProject、每个 root 的能量，优先 CASPT2。
+    energies[step][subproject][root] = {energy, method, raw_label}
+    """
+    geom_positions = [s["pos"] for s in steps]
+    markers_pos, markers_val = _build_subproject_markers(text)
+    energies: Dict[int, Dict[str, Dict[int, Dict[str, Any]]]] = {}
+
+    def method_priority(method: str) -> int:
+        if not method:
+            return 0
+        key = method.upper()
+        if key.startswith("XDW-CASPT2"):
+            return 4
+        if key.startswith("XMS-CASPT2"):
+            return 3
+        if key.startswith("MS-CASPT2"):
+            return 2
+        if key.endswith("CASPT2"):
+            return 1
+        if key == "CASSCF":
+            return 0
+        return 0
+
+    def store(pos: int, root: int, method: str, raw_label: str, energy: float):
+        step_idx = _step_index_from_pos(pos, geom_positions)
+        subproject_key = _subproject_for_pos(pos, markers_pos, markers_val)
+        root_bucket = energies.setdefault(step_idx, {}).setdefault(subproject_key, {})
+        prev = root_bucket.get(root)
+        priority = method_priority(method)
+        prev_priority = method_priority(prev.get("method")) if prev else -1
+        if prev and prev_priority > priority:
+            return
+        root_bucket[root] = dict(energy=energy, method=method, raw_label=raw_label)
+
+    for m in re.finditer(
+        r"RASSCF root number\s+(\d+)\s+Total energy:\s+([+-]?\d+\.\d+)", text
+    ):
+        root = int(m.group(1))
+        energy = float(m.group(2))
+        store(m.start(), root, "CASSCF", "RASSCF", energy)
+
+    for m in re.finditer(
+        r"([A-Z0-9\-]+CASPT2)\s+Root\s+(\d+)\s+Total energy:\s+([+-]?\d+\.\d+)",
+        text,
+    ):
+        raw = m.group(1)
+        root = int(m.group(2))
+        energy = float(m.group(3))
+        store(m.start(), root, raw, raw, energy)
+
+    return energies
 
