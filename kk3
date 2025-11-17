@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+kk: OpenMolcas 几何优化查看器（主程序）
+
+- 查找当前目录下最新的 OpenMolcas .out 文件
+- 判断是否为 &SLAPAF 几何优化
+- 使用 kk_parse 解析几何步 + CI 信息
+- 使用 kk_plot 生成 PNG（白底，两幅子图）
+- 使用 kk_display 在终端中以 sixel 显示，并提供 ↑ / ↓ / q 交互
+"""
+
+import os
+import sys
+import tempfile
+
+from kk_parse import (
+    find_openmolcas_out,
+    parse_geom_stats,
+    build_ci_by_step,
+    find_optimized_root,
+)
+from kk_plot import make_plot
+from kk_display import (
+    enter_alt_screen,
+    exit_alt_screen,
+    show_png_in_terminal,
+    read_key,
+    print_step_info,
+)
+
+
+def main():
+    out_path = find_openmolcas_out()
+    if not out_path:
+        os.execvp("ls", ["ls"])
+
+    with open(out_path, "r", errors="ignore") as fh:
+        text = fh.read()
+
+    if "&SLAPAF" not in text:
+        os.execvp("ls", ["ls"])
+
+    steps = parse_geom_stats(text)
+    if not steps:
+        print("[kk] 未在输出中找到 Geometry Optimization 的能量统计表。")
+        sys.exit(1)
+
+    ci_by_step = build_ci_by_step(text, steps)
+    opt_root = find_optimized_root(text)
+
+    nsteps = len(steps)
+    step = nsteps  # 默认最后一步
+
+    tmpdir = tempfile.gettempdir()
+    png_path = os.path.join(tmpdir, "kk_plot.png")
+
+    # 全程在备用屏幕中运行
+    enter_alt_screen()
+    try:
+        while True:
+            # 生成并显示当前步的图
+            make_plot(steps, step, png_path)
+            ok = show_png_in_terminal(png_path)
+            if not ok:
+                print(f"[kk] 无法直接在终端显示 PNG，图像保存在: {png_path}")
+
+            # 在图下面打印当前步信息
+            print_step_info(
+                out_path=out_path,
+                steps=steps,
+                step=step,
+                opt_root=opt_root,
+                ci_by_step=ci_by_step,
+            )
+
+            key = read_key()
+            if key in ("q", "Q"):
+                break
+            elif key == "UP":
+                if step > 1:
+                    step -= 1
+            elif key == "DOWN":
+                if step < nsteps:
+                    step += 1
+            else:
+                # 其他按键忽略
+                pass
+    finally:
+        exit_alt_screen()
+
+
+if __name__ == "__main__":
+    main()
+
