@@ -15,11 +15,19 @@ import os
 import sys
 import tempfile
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+KK_DIR = os.path.join(SCRIPT_DIR, ".kk")
+if os.path.isdir(KK_DIR) and KK_DIR not in sys.path:
+    sys.path.insert(0, KK_DIR)
+
 from kk_parse import (
     find_openmolcas_out,
     parse_geom_stats,
     build_ci_by_step,
     find_optimized_root,
+    collect_state_energies,
+    parse_ediff_targets,
+    list_subprojects,
 )
 from kk_plot import make_plot
 from kk_display import (
@@ -29,6 +37,60 @@ from kk_display import (
     read_key,
     print_step_info,
 )
+
+
+def _label_for_subproject(name: str) -> str:
+    if not name:
+        return "State"
+    return name.lstrip(".") or name
+
+
+def _build_state_targets(opt_root: int, ediff_roots, subprojects):
+    targets = []
+    if ediff_roots:
+        for idx, root in enumerate(ediff_roots):
+            sub = subprojects[idx] if idx < len(subprojects) else ""
+            targets.append(
+                dict(subproject=sub, root=root, group_label=_label_for_subproject(sub))
+            )
+    else:
+        sub = subprojects[0] if subprojects else ""
+        targets.append(
+            dict(subproject=sub, root=opt_root, group_label=_label_for_subproject(sub))
+        )
+    return targets
+
+
+def _build_energy_tracks(steps, state_targets, state_energies, opt_root):
+    n = len(steps)
+    tracks = []
+    seen = set()
+    for tgt in state_targets:
+        key = (tgt["subproject"], tgt["root"])
+        if key in seen:
+            continue
+        values = []
+        for idx in range(1, n + 1):
+            info = (
+                state_energies.get(idx, {})
+                .get(tgt["subproject"], {})
+                .get(tgt["root"])
+            )
+            values.append(info.get("energy") if info else None)
+        if all(v is None for v in values) and not tgt["subproject"] and tgt["root"] == opt_root:
+            values = [s["energy"] for s in steps]
+        label = tgt.get("group_label")
+        if label:
+            name = f"{label} r{tgt['root']}"
+        else:
+            name = f"Root {tgt['root']}"
+        tracks.append(dict(name=name, values=values))
+        seen.add(key)
+
+    if not tracks:
+        tracks.append(dict(name=f"Root {opt_root}", values=[s["energy"] for s in steps]))
+
+    return tracks
 
 
 def main():
@@ -48,7 +110,12 @@ def main():
         sys.exit(1)
 
     ci_by_step = build_ci_by_step(text, steps)
+    state_energies = collect_state_energies(text, steps)
     opt_root = find_optimized_root(text)
+    ediff_roots = parse_ediff_targets(text)
+    subprojects = list_subprojects(text)
+    state_targets = _build_state_targets(opt_root, ediff_roots, subprojects)
+    energy_tracks = _build_energy_tracks(steps, state_targets, state_energies, opt_root)
 
     nsteps = len(steps)
     step = nsteps  # 默认最后一步
@@ -61,7 +128,7 @@ def main():
     try:
         while True:
             # 生成并显示当前步的图
-            make_plot(steps, step, png_path)
+            make_plot(steps, step, png_path, energy_tracks)
             ok = show_png_in_terminal(png_path)
             if not ok:
                 print(f"[kk] 无法直接在终端显示 PNG，图像保存在: {png_path}")
@@ -73,6 +140,8 @@ def main():
                 step=step,
                 opt_root=opt_root,
                 ci_by_step=ci_by_step,
+                state_targets=state_targets,
+                state_energies=state_energies,
             )
 
             key = read_key()

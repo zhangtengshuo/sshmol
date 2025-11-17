@@ -89,9 +89,10 @@ def read_key() -> str:
 # CI selection（按你之前的要求）
 # ======================
 
-def _first_two_configs(ci_by_step, step, root):
+def _first_two_configs(ci_by_step, step, subproject_key, root):
     info_step = ci_by_step.get(step, {})
-    info = info_step.get(root)
+    info_sub = info_step.get(subproject_key, {})
+    info = info_sub.get(root)
     if not info:
         return []
     cfgs = info.get("configs", [])
@@ -116,84 +117,163 @@ def print_step_info(
     steps: List[Dict[str, Any]],
     step: int,
     opt_root: int,
-    ci_by_step: Dict[int, Dict[str, Any]]
+    ci_by_step: Dict[int, Dict[str, Any]],
+    state_targets: List[Dict[str, Any]],
+    state_energies: Dict[int, Dict[str, Any]],
 ):
     clear_below(TEXT_START)
-
     move_cursor(TEXT_START)
 
     nsteps = len(steps)
-    info = ci_by_step.get(step, {})
     H2KCAL = 627.509474
+    step_idx = max(1, min(step, nsteps))
+    info_step = ci_by_step.get(step_idx, {})
+    energy_step = state_energies.get(step_idx, {})
 
-    # 当前优化 root 的能量
-    opt_info = info.get(opt_root)
-    e_opt = opt_info.get("energy") if opt_info else None
-
-    print(
-        f"[kk] File: {out_path}   Steps: {nsteps} (current: {step})   rlxroot: {opt_root}"
-    )
-
-    # 表头（反白）
-    hdr = (
-        "Root  E (Eh)        ΔE (kcal/mol)   Major Config                Weight"
-    )
-    print("\033[1;7m" + hdr + "\033[0m")
-
-    # 打印三个 root（opt_root 前后）
-    for r in [opt_root - 1, opt_root, opt_root + 1]:
-        if r <= 0:
-            continue
-
-        ri = info.get(r)
-        if not ri:
-            continue
-
-        E = ri.get("energy")
-        if E is not None and e_opt is not None and r != opt_root:
-            dE = (E - e_opt) * H2KCAL
-            dE_s = f"{dE:+.2f}"
-        else:
-            dE_s = ""
-
-        E_s = f"{E: .6f}" if E is not None else " " * 10
-
-        cfgs = _first_two_configs(ci_by_step, step, r)
-
-        if r == opt_root:
-            root_label = f"{r}*"
-            prefix = "\033[1m"
-            suffix = "\033[0m"
-        else:
-            root_label = f"{r}"
-            prefix = ""
-            suffix = ""
-
-        if cfgs:
-            c0 = cfgs[0]
-            conf0 = f"{c0['idx']:7d} {c0['conf']}"
-            w0 = f"{c0['weight']: .4f}"
-        else:
-            conf0 = ""
-            w0 = ""
-
-        line1 = (
-            f"{root_label:<4} {E_s:>12} {dE_s:>14}   "
-            f"{conf0:<26} {w0:>7}"
+    if len(state_targets) == 1:
+        summary = (
+            f"[kk] File: {out_path}   Steps: {nsteps} (current: {step_idx})   "
+            f"rlxroot: {opt_root}"
         )
-        print(prefix + line1 + suffix)
+    else:
+        tracked = ", ".join(
+            f"{t['group_label']} r{t['root']}" for t in state_targets
+        )
+        summary = (
+            f"[kk] File: {out_path}   Steps: {nsteps} (current: {step_idx})   "
+            f"Targets: {tracked}"
+        )
+    print(summary)
 
-        if len(cfgs) > 1:
-            c1 = cfgs[1]
-            conf1 = f"{c1['idx']:7d} {c1['conf']}"
-            w1 = f"{c1['weight']: .4f}"
-            line2 = (
-                f"{'':4} {'':12} {'':14}   "
-                f"{conf1:<26} {w1:>7}"
+    def get_energy(sub_key: str, root: int, fallback: Any = None):
+        sub_data = energy_step.get(sub_key, {})
+        info = sub_data.get(root)
+        if info:
+            label = info.get("raw_label") or info.get("method", "")
+            return info.get("energy"), label
+        if fallback is not None:
+            return fallback, "Geom"
+        return None, ""
+
+    def group_label(name: str) -> str:
+        if not name:
+            return "State"
+        label = name.lstrip(".") or name
+        return label
+
+    group_map: Dict[str, Dict[str, Any]] = {}
+    group_order: List[str] = []
+    show_neighbors = len(state_targets) == 1
+
+    for tgt in state_targets:
+        key = tgt["subproject"]
+        entry = group_map.setdefault(
+            key,
+            dict(
+                label=tgt.get("group_label") or group_label(key),
+                roots=[],
+            ),
+        )
+        entry["roots"].append(dict(root=tgt["root"], is_target=True))
+        if key not in group_order:
+            group_order.append(key)
+
+    if show_neighbors:
+        tgt = state_targets[0]
+        key = tgt["subproject"]
+        extra = group_map.setdefault(
+            key,
+            dict(label=group_label(key), roots=[]),
+        )
+        for neighbor in (tgt["root"] - 1, tgt["root"] + 1):
+            if neighbor > 0 and all(r["root"] != neighbor for r in extra["roots"]):
+                extra["roots"].append(dict(root=neighbor, is_target=False))
+
+    rendered_groups: List[List[str]] = []
+
+    fallback_energy = steps[step_idx - 1]["energy"] if steps else None
+
+    for key in group_order:
+        block = group_map.get(key)
+        if not block:
+            continue
+        title = block["label"]
+        roots = block["roots"]
+        # 保持 targets 在前
+        roots.sort(key=lambda r: (not r["is_target"], r["root"]))
+        sub_lines: List[str] = []
+        sub_lines.append(f"[{title}]")
+        header = (
+            "Root  Level   E (Eh)        ΔE (kcal/mol)   "
+            "Major Config                Weight"
+        )
+        sub_lines.append("\033[1;7m" + header + "\033[0m")
+
+        ref_energy = None
+        for r in roots:
+            sub_key = key
+            fb = fallback_energy if (show_neighbors and r["is_target"] and not sub_key) else None
+            energy, method = get_energy(sub_key, r["root"], fb)
+            if ref_energy is None and r["is_target"] and energy is not None:
+                ref_energy = energy
+
+            if energy is not None and ref_energy is not None:
+                dE = (energy - ref_energy) * H2KCAL
+                dE_s = f"{dE:+.2f}"
+            else:
+                dE_s = ""
+
+            E_s = f"{energy: .6f}" if energy is not None else " " * 10
+            level = method or ""
+
+            cfgs = _first_two_configs(ci_by_step, step_idx, key, r["root"])
+            if cfgs:
+                c0 = cfgs[0]
+                conf0 = f"{c0['idx']:7d} {c0['conf']}"
+                w0 = f"{c0['weight']: .4f}"
+            else:
+                conf0 = ""
+                w0 = ""
+
+            root_label = f"{r['root']}{'*' if r['is_target'] else ''}"
+            prefix = "\033[1m" if r["is_target"] else ""
+            suffix = "\033[0m" if r["is_target"] else ""
+
+            line1 = (
+                f"{root_label:<4} {level:<7} {E_s:>12} {dE_s:>14}   "
+                f"{conf0:<26} {w0:>7}"
             )
-            print(prefix + line2 + suffix)
+            sub_lines.append(prefix + line1 + suffix)
 
-    print("\n[kk] ↑ / ↓ 切换步数，q 退出。", end="", flush=True)
+            if len(cfgs) > 1:
+                c1 = cfgs[1]
+                conf1 = f"{c1['idx']:7d} {c1['conf']}"
+                w1 = f"{c1['weight']: .4f}"
+                line2 = (
+                    f"{'':4} {'':7} {'':12} {'':14}   "
+                    f"{conf1:<26} {w1:>7}"
+                )
+                sub_lines.append(prefix + line2 + suffix)
+
+        rendered_groups.append(sub_lines)
+
+    if len(rendered_groups) == 2:
+        left = rendered_groups[0]
+        right = rendered_groups[1]
+        width_left = max(len(line) for line in left) if left else 0
+        rows = max(len(left), len(right))
+        for i in range(rows):
+            l_line = left[i] if i < len(left) else ""
+            r_line = right[i] if i < len(right) else ""
+            print(f"{l_line:<{width_left + 4}}{r_line}")
+    else:
+        for lines in rendered_groups:
+            for line in lines:
+                print(line)
+            print()
+
+    print()
+    print("[kk] ↑ / ↓ 切换步数，q 退出。", end="", flush=True)
 
 
 # ======================
