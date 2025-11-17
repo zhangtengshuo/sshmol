@@ -164,11 +164,11 @@ def print_step_info(
     target_subprojects = {(t["subproject"] or "") for t in state_targets}
     is_interspin = len(state_targets) == 2 and len(target_subprojects) == 2
 
-    LEVEL_W = 14
-    ROOT_W = 5
-    E_W = 12
+    LEVEL_W = 10
+    ROOT_W = 4
+    E_W = 11
     DELTA_W = 6
-    CONFIG_W = 28
+    CONFIG_W = 20
     WEIGHT_W = 6
 
     def pad_text(text: str, width: int, align: str = "left") -> str:
@@ -285,7 +285,7 @@ def print_step_info(
             cfgs = _first_two_configs(ci_by_step, step_idx, key, r["root"])
             if cfgs:
                 c0 = cfgs[0]
-                conf0 = f"{c0['idx']:7d} {c0['conf']}"
+                conf0 = f"{c0['idx']:5d} {c0['conf']}"
                 w0 = f"{c0['weight']:.2f}"
             else:
                 conf0 = ""
@@ -312,7 +312,7 @@ def print_step_info(
 
             if len(cfgs) > 1:
                 c1 = cfgs[1]
-                conf1 = f"{c1['idx']:7d} {c1['conf']}"
+                conf1 = f"{c1['idx']:5d} {c1['conf']}"
                 w1 = f"{c1['weight']:.2f}"
                 line2 = format_line(
                     include_level,
@@ -335,10 +335,10 @@ def print_step_info(
         right_lines = right["lines"]
         width_left = max(len(line) for line in left_lines) if left_lines else 0
         rows = max(len(left_lines), len(right_lines))
-        delta_col_width = max(len("ΔE (kcal/mol)"), DELTA_W + 4)
+        delta_col_width = max(len("ΔE kcal/mol"), DELTA_W + 4)
         delta_lines = ["" for _ in range(rows)]
         if rows > 1:
-            delta_lines[1] = "ΔE (kcal/mol)"
+            delta_lines[1] = "ΔE kcal/mol"
 
         delta_value = ""
         if len(state_targets) >= 2:
