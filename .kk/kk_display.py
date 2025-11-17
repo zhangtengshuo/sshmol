@@ -161,6 +161,59 @@ def print_step_info(
         label = name.lstrip(".") or name
         return label
 
+    target_subprojects = {(t["subproject"] or "") for t in state_targets}
+    is_interspin = len(state_targets) == 2 and len(target_subprojects) == 2
+
+    LEVEL_W = 14
+    ROOT_W = 5
+    E_W = 12
+    DELTA_W = 6
+    CONFIG_W = 28
+    WEIGHT_W = 6
+
+    def pad_text(text: str, width: int, align: str = "left") -> str:
+        if text is None:
+            text = ""
+        text = str(text)
+        if align == "right":
+            return text.rjust(width)
+        if align == "center":
+            return text.center(width)
+        return text.ljust(width)
+
+    def format_header(include_level: bool, show_delta: bool) -> str:
+        parts = []
+        if include_level:
+            parts.append(pad_text("Level", LEVEL_W))
+        parts.append(pad_text("Root", ROOT_W))
+        parts.append(pad_text("E (Eh)", E_W, "right"))
+        if show_delta:
+            parts.append(pad_text("ΔE", DELTA_W, "right"))
+        parts.append(pad_text("Major Config", CONFIG_W))
+        parts.append(pad_text("Weight", WEIGHT_W, "right"))
+        return " ".join(parts)
+
+    def format_line(
+        include_level: bool,
+        show_delta: bool,
+        level_text: str,
+        root_text: str,
+        energy_text: str,
+        delta_text: str,
+        config_text: str,
+        weight_text: str,
+    ) -> str:
+        parts = []
+        if include_level:
+            parts.append(pad_text(level_text, LEVEL_W))
+        parts.append(pad_text(root_text, ROOT_W))
+        parts.append(pad_text(energy_text, E_W, "right"))
+        if show_delta:
+            parts.append(pad_text(delta_text, DELTA_W, "right"))
+        parts.append(pad_text(config_text, CONFIG_W))
+        parts.append(pad_text(weight_text, WEIGHT_W, "right"))
+        return " ".join(parts)
+
     group_map: Dict[str, Dict[str, Any]] = {}
     group_order: List[str] = []
     show_neighbors = len(state_targets) == 1
@@ -189,9 +242,13 @@ def print_step_info(
             if neighbor > 0 and all(r["root"] != neighbor for r in extra["roots"]):
                 extra["roots"].append(dict(root=neighbor, is_target=False))
 
-    rendered_groups: List[List[str]] = []
+    rendered_groups: List[Dict[str, Any]] = []
 
     fallback_energy = steps[step_idx - 1]["energy"] if steps else None
+    show_delta_column = not is_interspin
+    include_level_flags = {key: True for key in group_order}
+    if is_interspin and len(group_order) >= 2:
+        include_level_flags[group_order[1]] = False
 
     for key in group_order:
         block = group_map.get(key)
@@ -201,36 +258,35 @@ def print_step_info(
         roots = block["roots"]
         # 保持 targets 在前
         roots.sort(key=lambda r: (not r["is_target"], r["root"]))
+        include_level = include_level_flags.get(key, True)
         sub_lines: List[str] = []
         sub_lines.append(f"[{title}]")
-        header = (
-            "Root  Level   E (Eh)        ΔE (kcal/mol)   "
-            "Major Config                Weight"
-        )
-        sub_lines.append("\033[1;7m" + header + "\033[0m")
+        header_line = format_header(include_level, show_delta_column)
+        sub_lines.append("\033[1;7m" + header_line + "\033[0m")
 
         ref_energy = None
+        target_line_idx = None
         for r in roots:
             sub_key = key
             fb = fallback_energy if (show_neighbors and r["is_target"] and not sub_key) else None
             energy, method = get_energy(sub_key, r["root"], fb)
-            if ref_energy is None and r["is_target"] and energy is not None:
+            if show_delta_column and ref_energy is None and r["is_target"] and energy is not None:
                 ref_energy = energy
 
-            if energy is not None and ref_energy is not None:
+            if show_delta_column and energy is not None and ref_energy is not None:
                 dE = (energy - ref_energy) * H2KCAL
-                dE_s = f"{dE:+.2f}"
+                dE_s = f"{dE:+6.2f}"
             else:
                 dE_s = ""
 
-            E_s = f"{energy: .6f}" if energy is not None else " " * 10
+            E_s = f"{energy:.4f}" if energy is not None else ""
             level = method or ""
 
             cfgs = _first_two_configs(ci_by_step, step_idx, key, r["root"])
             if cfgs:
                 c0 = cfgs[0]
                 conf0 = f"{c0['idx']:7d} {c0['conf']}"
-                w0 = f"{c0['weight']: .4f}"
+                w0 = f"{c0['weight']:.2f}"
             else:
                 conf0 = ""
                 w0 = ""
@@ -239,27 +295,73 @@ def print_step_info(
             prefix = "\033[1m" if r["is_target"] else ""
             suffix = "\033[0m" if r["is_target"] else ""
 
-            line1 = (
-                f"{root_label:<4} {level:<7} {E_s:>12} {dE_s:>14}   "
-                f"{conf0:<26} {w0:>7}"
+            line1 = format_line(
+                include_level,
+                show_delta_column,
+                level if include_level else "",
+                root_label,
+                E_s,
+                dE_s,
+                conf0,
+                w0,
             )
+            line_index = len(sub_lines)
             sub_lines.append(prefix + line1 + suffix)
+            if r["is_target"] and target_line_idx is None:
+                target_line_idx = line_index
 
             if len(cfgs) > 1:
                 c1 = cfgs[1]
                 conf1 = f"{c1['idx']:7d} {c1['conf']}"
-                w1 = f"{c1['weight']: .4f}"
-                line2 = (
-                    f"{'':4} {'':7} {'':12} {'':14}   "
-                    f"{conf1:<26} {w1:>7}"
+                w1 = f"{c1['weight']:.2f}"
+                line2 = format_line(
+                    include_level,
+                    show_delta_column,
+                    "",
+                    "",
+                    "",
+                    "",
+                    conf1,
+                    w1,
                 )
                 sub_lines.append(prefix + line2 + suffix)
 
-        rendered_groups.append(sub_lines)
+        rendered_groups.append(dict(lines=sub_lines, target_line_idx=target_line_idx))
 
-    if len(rendered_groups) == 2:
+    if is_interspin and len(rendered_groups) == 2:
         left = rendered_groups[0]
         right = rendered_groups[1]
+        left_lines = left["lines"]
+        right_lines = right["lines"]
+        width_left = max(len(line) for line in left_lines) if left_lines else 0
+        rows = max(len(left_lines), len(right_lines))
+        delta_col_width = max(len("ΔE (kcal/mol)"), DELTA_W + 4)
+        delta_lines = ["" for _ in range(rows)]
+        if rows > 1:
+            delta_lines[1] = "ΔE (kcal/mol)"
+
+        delta_value = ""
+        if len(state_targets) >= 2:
+            left_t = state_targets[0]
+            right_t = state_targets[1]
+            left_energy, _ = get_energy(left_t["subproject"], left_t["root"])
+            right_energy, _ = get_energy(right_t["subproject"], right_t["root"])
+            if left_energy is not None and right_energy is not None:
+                diff = (right_energy - left_energy) * H2KCAL
+                delta_value = f"{diff:+6.2f}"
+
+        target_line = left.get("target_line_idx")
+        if delta_value and isinstance(target_line, int) and target_line < rows:
+            delta_lines[target_line] = delta_value
+
+        for i in range(rows):
+            l_line = left_lines[i] if i < len(left_lines) else ""
+            r_line = right_lines[i] if i < len(right_lines) else ""
+            delta_text = delta_lines[i] if i < len(delta_lines) else ""
+            print(f"{l_line:<{width_left + 2}}{delta_text:^{delta_col_width}}{r_line}")
+    elif len(rendered_groups) == 2:
+        left = rendered_groups[0]["lines"]
+        right = rendered_groups[1]["lines"]
         width_left = max(len(line) for line in left) if left else 0
         rows = max(len(left), len(right))
         for i in range(rows):
@@ -267,7 +369,8 @@ def print_step_info(
             r_line = right[i] if i < len(right) else ""
             print(f"{l_line:<{width_left + 4}}{r_line}")
     else:
-        for lines in rendered_groups:
+        for group in rendered_groups:
+            lines = group["lines"]
             for line in lines:
                 print(line)
             print()

@@ -242,13 +242,27 @@ def _parse_mixed_ci_block(text: str, start_pos: int) -> Dict[int, Dict[str, Any]
                 conf_idx = int(parts[0])
             except ValueError:
                 break
-            conf = " ".join(parts[1:-2])
+
+            # Occupation string 紧跟在括号描述之后
+            occ_pos = None
+            for j in range(1, len(parts)):
+                if parts[j].endswith(")"):
+                    occ_pos = j + 1
+                    break
+            if occ_pos is None or occ_pos + 2 >= len(parts):
+                break
+
+            occupation = parts[occ_pos]
+
             try:
-                coeff = float(parts[-2])
-                weight = float(parts[-1])
+                coeff = float(parts[occ_pos + 1])
+                weight = float(parts[occ_pos + 2])
             except ValueError:
                 break
-            configs.append(dict(idx=conf_idx, conf=conf, coeff=coeff, weight=weight))
+
+            configs.append(
+                dict(idx=conf_idx, conf=occupation, coeff=coeff, weight=weight)
+            )
             idx += 1
         results[root] = dict(configs=configs)
         idx += 1
@@ -338,15 +352,30 @@ def collect_state_energies(
     markers_pos, markers_val = _build_subproject_markers(text)
     energies: Dict[int, Dict[str, Dict[int, Dict[str, Any]]]] = {}
 
-    METHOD_PRIORITY = {"CASSCF": 0, "CASPT2": 1}
+    def method_priority(method: str) -> int:
+        if not method:
+            return 0
+        key = method.upper()
+        if key.startswith("XDW-CASPT2"):
+            return 4
+        if key.startswith("XMS-CASPT2"):
+            return 3
+        if key.startswith("MS-CASPT2"):
+            return 2
+        if key.endswith("CASPT2"):
+            return 1
+        if key == "CASSCF":
+            return 0
+        return 0
 
     def store(pos: int, root: int, method: str, raw_label: str, energy: float):
         step_idx = _step_index_from_pos(pos, geom_positions)
         subproject_key = _subproject_for_pos(pos, markers_pos, markers_val)
         root_bucket = energies.setdefault(step_idx, {}).setdefault(subproject_key, {})
         prev = root_bucket.get(root)
-        priority = METHOD_PRIORITY.get(method, 0)
-        if prev and METHOD_PRIORITY.get(prev.get("method", "CASSCF"), 0) > priority:
+        priority = method_priority(method)
+        prev_priority = method_priority(prev.get("method")) if prev else -1
+        if prev and prev_priority > priority:
             return
         root_bucket[root] = dict(energy=energy, method=method, raw_label=raw_label)
 
@@ -364,7 +393,7 @@ def collect_state_energies(
         raw = m.group(1)
         root = int(m.group(2))
         energy = float(m.group(3))
-        store(m.start(), root, "CASPT2", raw, energy)
+        store(m.start(), root, raw, raw, energy)
 
     return energies
 
